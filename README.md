@@ -80,121 +80,175 @@ champion.
 
 ## 1. Problem formulation
 
-The board is G = {0,…,W−1} × {0,…,H−1}. A state is s = (body, heading, apple, hunger), where the body is
-a sequence of cells c₀ (head), …, c_{L−1}. The game is a Markov decision process, deterministic except
-for the apple position, which is drawn uniformly among free cells. An episode ends on collision (wall or
-body), on starvation (h consecutive steps without eating, h = W·H by default), or on a win (board full).
+The board is the grid
 
-We search for a policy π : φ(s) ↦ a that maximizes the expected fitness
+```math
+\mathcal{G} = \{0, \dots, W-1\} \times \{0, \dots, H-1\}.
+```
 
-$$F = 1000 \cdot \text{apples} + \text{steps survived}.$$
+A state is $`s = (\mathbf{c}, h, p, \eta)`$: the body $`\mathbf{c} = (c_0, \dots, c_{L-1}) \in \mathcal{G}^L`$ with head $`c_0`$, the heading $`h \in \mathbb{Z}/4\mathbb{Z}`$, the apple $`p \in \mathcal{G}`$ and the hunger counter $`\eta \in \mathbb{N}`$. The game is a Markov decision process, deterministic except for the apple, which is drawn uniformly among free cells:
 
-Since h ≤ W·H < 1000, F induces an almost **lexicographic order**. A snake eating k+1 apples always beats
-one eating k, and survival time only breaks ties. Survival without eating, for example circling forever,
-is capped by h. This removes the degenerate "loop forever" strategy.
+```math
+p \sim \mathcal{U}\big(\mathcal{G} \setminus \{c_0, \dots, c_{L-1}\}\big).
+```
+
+An episode ends on collision (wall or body), on starvation ($`\eta \ge \eta_{\max}`$ steps without eating, with $`\eta_{\max} = W H`$ by default), or on a win (board full).
+
+We search for a policy $`\pi_\theta : \phi(s) \mapsto a`$ that maximizes the expected fitness
+
+```math
+F(\theta) = \mathbb{E}\big[\, 1000 \cdot A + T \,\big],
+```
+
+where $`A`$ is the number of apples eaten and $`T`$ the number of steps survived.
+
+**Lexicographic order.** Between two apples the snake survives at most $`\eta_{\max}`$ steps, and $`\eta_{\max} \le WH < 1000`$. Hence, for two episodes,
+
+```math
+A_1 > A_2 \;\Longrightarrow\; 1000\,A_1 + T_1 > 1000\,A_2 + T_2 ,
+```
+
+so $`F`$ ranks apples first and uses survival only to break ties. Survival without eating, for example circling forever, is capped at $`\eta_{\max}`$. This removes the degenerate "loop forever" strategy.
 
 ## 2. Representation
 
 ### 2.1 Relative actions
-a ∈ {left, straight, right}, with heading ← heading + a − 1 (mod 4). The U-turn, which is always fatal,
-cannot be expressed. The network has 3 outputs and the action is their argmax.
+The action set is $`a \in \{0, 1, 2\}`$ (left, straight, right), with heading update
+
+```math
+h_{t+1} = h_t + a_t - 1 \pmod 4 .
+```
+
+The U-turn, which is always fatal, cannot be expressed. The network has 3 outputs $`y \in \mathbb{R}^3`$ and the action is $`a = \arg\max_k y_k`$.
 
 ### 2.2 Egocentric observation
-Eight rays are cast from the head in the **snake's own frame**: forward, forward-right, right, …,
-forward-left. Let t be the number of steps along a ray:
+Let $`f = (f_x, f_y)`$ be the heading vector and $`r = (-f_y, f_x)`$ its clockwise rotation (the snake's right). Eight rays are cast from the head along
 
-| channel | value | range |
-|---|---|---|
-| wall | 1 / t_wall (first step outside the board) | ]0, 1] |
-| body | 1 / t_body, 0 if no segment on the ray | [0, 1] |
-| food | 1 − (t_food − 1)/max(W,H), 0 if not on the ray | [0, 1] |
+```math
+d_k \in \{\, f,\; f + r,\; r,\; r - f,\; -f,\; -f - r,\; -r,\; f - r \,\}, \qquad k = 0, \dots, 7,
+```
 
-which gives φ(s) ∈ [0,1]²⁴.
+that is forward, forward-right, …, forward-left in the **snake's own frame**. Along ray $`k`$, let $`t^{\text{wall}}_k`$ be the first step outside the board, and $`t^{\text{body}}_k`$, $`t^{\text{food}}_k`$ the first step that hits a body segment or the apple ($`+\infty`$ if none). Each ray contributes three features:
 
-**Why egocentric?** When W = H, the cyclic group C₄ of board rotations acts on states, and the optimal
-policy is equivariant. Expressing φ in the snake's frame gives φ(ρ·s) = φ(s) for every rotation ρ
-(checked by `test_rotation_invariance_of_observation`). Combined with relative actions, one learned
-behaviour serves all four headings, which cuts the behaviour space to discover by a factor of four.
-Inverse distances give a sharp signal when danger is close, while food is encoded linearly so it stays
-detectable from afar.
+```math
+\phi_{3k} = \frac{1}{t^{\text{wall}}_k}, \qquad
+\phi_{3k+1} = \frac{1}{t^{\text{body}}_k}, \qquad
+\phi_{3k+2} = \begin{cases} 1 - \dfrac{t^{\text{food}}_k - 1}{\max(W, H)} & \text{if } t^{\text{food}}_k < \infty, \\[4pt] 0 & \text{otherwise,} \end{cases}
+```
 
-`--compass` adds 2 inputs: the head→apple vector projected on the forward and right axes, normalized.
-With rays only, the apple is seen only when it is aligned with one of the 8 directions. Section 5
-measures the effect of this extra information.
+with the convention $`1/\infty = 0`$. This gives $`\phi(s) \in [0, 1]^{24}`$.
+
+**Why egocentric?** When $`W = H`$, the cyclic group $`C_4`$ of board rotations acts on states, and the optimal policy is equivariant under it. Because $`\phi`$ is expressed in the snake's frame,
+
+```math
+\phi(\rho \cdot s) = \phi(s) \qquad \forall \rho \in C_4 ,
+```
+
+which is checked by `test_rotation_invariance_of_observation`. Combined with relative actions, one learned behaviour serves all four headings, which cuts the behaviour space to discover by a factor of $`|C_4| = 4`$. Inverse distances give a sharp signal when danger is close, while food is encoded linearly so it stays detectable from afar.
+
+`--compass` adds two inputs, the head→apple vector $`e = p - c_0`$ projected on the snake's axes:
+
+```math
+\phi_{24} = \frac{\langle e, f \rangle}{\max(W, H)}, \qquad \phi_{25} = \frac{\langle e, r \rangle}{\max(W, H)} .
+```
+
+With rays only, the apple is seen only when it is aligned with one of the 8 directions. Section 5 measures the effect of this extra information.
 
 ## 3. NEAT
 
 ### 3.1 Genome and historical markings
-A genome is a set of nodes (input, output, hidden, each with a bias) and connection genes
-(src, dst, w, enabled, innovation). The **innovation number** comes from a global registry keyed by the
-pair (src, dst). The same structure therefore always carries the same number, which aligns two
-arbitrary topologies in O(|C|) without any graph matching. A node created by splitting connection i also
-gets a canonical id (i, k).
+A genome is a pair $`g = (\mathcal{N}, \mathcal{C})`$. Each node $`v \in \mathcal{N}`$ is an input, output or hidden unit with a bias $`b_v`$. Each connection gene is a tuple
 
-**Initial population**: the minimal topology, with all 24 inputs wired to the 3 outputs (72 genes) and
-no hidden node. Complexity grows only when selection rewards it, which is the *complexification*
-principle of NEAT.
+```math
+(u \to v,\; w_{uv},\; \text{enabled},\; \iota) \in \mathcal{C},
+```
+
+where $`\iota`$ is its **innovation number**. Innovation numbers come from a global registry keyed by the pair $`(u, v)`$: the same structure always carries the same number, so two arbitrary topologies are aligned in $`O(|\mathcal{C}|)`$ without any graph matching. A node created by the $`k`$-th split of connection $`\iota`$ gets the canonical identifier $`(\iota, k)`$.
+
+**Initial population**: the minimal topology, with all 24 inputs wired to the 3 outputs ($`24 \times 3 = 72`$ genes) and no hidden node. Complexity grows only when selection rewards it, which is the *complexification* principle of NEAT.
 
 ### 3.2 Mutations
-- **weights and biases**: with probability 0.8 per genome, each gene is touched with probability 0.5.
-  It is then perturbed by 𝒩(0, 0.4²) in 90 % of cases, or redrawn from 𝒩(0, 1) in 10 %. Values are
-  clipped to [−8, 8].
-- **add node** (p = 0.03): a→b becomes a→h (weight 1) then h→b (old weight), and a→b is disabled. The
-  behaviour is almost preserved for small pre-activations, since tanh(x) ≈ x.
-- **add connection** (p = 0.10): a random edge is added only if it **creates no cycle**. The check covers
-  all genes, including disabled ones, because they may be re-enabled later. The network is always a DAG.
-- **toggle** enabled/disabled (p = 0.01).
+**Weights and biases.** With probability $`0.8`$ per genome, each gene is touched with probability $`0.5`$, then updated as
+
+```math
+w \leftarrow \operatorname{clip}_{[-8,\,8]}\!\big(w'\big), \qquad
+w' = \begin{cases} w + \varepsilon, \;\; \varepsilon \sim \mathcal{N}(0, 0.4^2) & \text{with probability } 0.9, \\ \tilde w \sim \mathcal{N}(0, 1) & \text{with probability } 0.1 . \end{cases}
+```
+
+**Structural mutations.**
+- **Add node** ($`p = 0.03`$). A connection $`u \to v`$ of weight $`w`$ is disabled and replaced by $`u \to h`$ (weight $`1`$) and $`h \to v`$ (weight $`w`$). Since $`\tanh(x) \approx x`$ for small $`x`$, the behaviour is almost preserved.
+- **Add connection** ($`p = 0.10`$). A random edge $`u \to v`$ is added only if $`u`$ is not reachable from $`v`$, so that no cycle is created. The check covers every gene, including disabled ones, because they may be re-enabled later. The network is therefore always a DAG.
+- **Toggle** enabled/disabled ($`p = 0.01`$).
 
 ### 3.3 Crossover
-Homologous genes (same innovation) are drawn at random from either parent. Disjoint and excess genes come
-from the fitter parent. A gene disabled in either parent stays disabled with probability 0.75. The child
-inherits the *structure* of the fitter parent, which preserves acyclicity with no extra check.
+Let $`g_1`$ be the fitter parent. Homologous genes (same $`\iota`$) are drawn uniformly from either parent. Disjoint and excess genes are taken from $`g_1`$. A gene disabled in either parent stays disabled with probability $`0.75`$. The child inherits the *structure* of $`g_1`$, which preserves acyclicity with no extra check.
 
 ### 3.4 Speciation and fitness sharing
-Compatibility distance:
+The compatibility distance between two genomes is
 
-$$\delta(g_1, g_2) = c_1 \frac{E}{N} + c_2 \frac{D}{N} + c_3 \bar W,$$
+```math
+\delta(g_1, g_2) = c_1 \frac{E}{N} + c_2 \frac{D}{N} + c_3 \overline{W},
+\qquad N = \max\big(|\mathcal{C}_1|, |\mathcal{C}_2|\big),
+```
 
-where E is the number of excess genes, D the number of disjoint genes, W̄ the mean weight difference of
-homologous genes, and N = max(|C₁|, |C₂|). We use c₁ = c₂ = 1 and c₃ = 0.4. A genome joins the first
-species whose representative (a random member of the previous generation) lies at distance < δ_t. The
-threshold is **controlled multiplicatively**, δ_t ← δ_t·(1 ± 0.05), to keep about 10 species. This
-controller does not depend on the scale of δ.
+where $`E`$ is the number of excess genes, $`D`$ the number of disjoint genes, and $`\overline{W}`$ the mean absolute weight difference of homologous genes. We use $`c_1 = c_2 = 1`$ and $`c_3 = 0.4`$. A genome joins the first species $`S`$ whose representative $`g_S`$ (a random member of the previous generation) satisfies $`\delta(g, g_S) < \delta_t`$.
 
-**Explicit fitness sharing**: f'_i = f_i / |S|, hence Σ_{i∈S} f'_i = f̄_S. Species S receives
+The threshold is **controlled multiplicatively** toward a target number of species $`K^\star = 10`$:
 
-$$n_S = N_{\text{pop}} \cdot \frac{\bar f_S}{\sum_T \bar f_T}$$
+```math
+\delta_t \leftarrow \begin{cases} \delta_t\,(1 - \alpha) & \text{if } K < K^\star, \\ \delta_t\,(1 + \alpha) & \text{if } K > K^\star, \end{cases} \qquad \alpha = 0.05 .
+```
 
-offspring, rounded with the largest-remainder method so that Σ n_S = N_pop exactly. A species cannot grow
-merely because it is large. This protects a structural innovation while its weights are being tuned.
+Unlike an additive step, this controller does not depend on the scale of $`\delta`$.
 
-The rest of reproduction follows the paper. Only the top 25 % of a species reproduce. The champion of
-every species with ≥ 5 members is copied unchanged. A species that has not improved for 20 generations
-goes extinct, except the 2 best ones and the one holding the global champion. 75 % of offspring come from
-crossover (1 % of them between species), and every offspring is then mutated.
+**Explicit fitness sharing.** The adjusted fitness of an individual $`i \in S`$ is
+
+```math
+f'_i = \frac{f_i}{|S|}, \qquad \text{hence} \qquad \sum_{i \in S} f'_i = \bar f_S ,
+```
+
+and species $`S`$ receives
+
+```math
+n_S = N_{\text{pop}} \cdot \frac{\bar f_S}{\sum_{T} \bar f_T}
+```
+
+offspring, rounded with the largest-remainder method so that $`\sum_S n_S = N_{\text{pop}}`$ exactly. A species cannot grow merely because it is large. This protects a structural innovation while its weights are being tuned.
+
+The rest of reproduction follows the paper:
+- only the top 25 % of a species reproduce;
+- the champion of every species with at least 5 members is copied unchanged;
+- a species that has not improved for 20 generations goes extinct, except the 2 best ones and the one holding the global champion;
+- 75 % of offspring come from crossover, 1 % of them between species, and every offspring is then mutated.
 
 ### 3.5 Phenotype: layered forward pass
-Depth d(v) = 0 for an input, otherwise 1 + the maximum depth of its predecessors (computed with Kahn's
-topological sort). Nodes at the same depth only depend on strictly shallower nodes, so
+Define the depth of a node by $`d(v) = 0`$ for an input and
 
-$$x_{L_k} \leftarrow \tanh(W_k x + b_k), \quad k = 1, \dots, d_{\max},$$
+```math
+d(v) = 1 + \max_{(u \to v) \in \mathcal{C}_{\text{on}}} d(u)
+```
 
-with a dense W_k ∈ ℝ^{|L_k|×|V|}. This takes d_max numpy matrix-vector products instead of a Python loop
-over nodes. Exact equality with the recursive definition is checked by
-`test_layered_forward_equals_recursive_definition` on 20 heavily mutated random networks.
+otherwise ($`d(v) = 1`$ if $`v`$ has no enabled predecessor), computed with Kahn's topological sort. Let $`L_k = \{ v : d(v) = k \}`$. Nodes of $`L_k`$ only depend on strictly shallower nodes, so the forward pass is exactly
+
+```math
+x_{L_k} \leftarrow \tanh\!\big( W_k\, x + b_k \big), \qquad k = 1, \dots, d_{\max},
+```
+
+with a dense $`W_k \in \mathbb{R}^{|L_k| \times |\mathcal{N}|}`$. This takes $`d_{\max}`$ numpy matrix-vector products, costing $`O(d_{\max} |\mathcal{N}|^2)`$ flops, instead of a Python loop over nodes. Exact equality with the recursive definition is checked by `test_layered_forward_equals_recursive_definition` on 20 heavily mutated random networks. Note that $`\tanh(x) = 2\sigma(2x) - 1`$ belongs to the same family as the steepened sigmoid $`\sigma(4.9x)`$ of the original paper.
 
 ### 3.6 Evaluation and variance control
-Fitness is a random variable, because the apple is placed at random. Three measures control it:
-1. **averaging over K = 3 games**;
-2. **common random numbers**: within a generation, every genome plays the *same* K seeds. A fitness
-   difference between two individuals then reflects their policies rather than the luck of the draws;
-3. **re-evaluating elites**: seeds change every generation, and a copied elite is evaluated again.
-   Otherwise the retained champion would be the maximum of noisy estimates, biased upwards (the
-   *winner's curse*), and the population could overfit one particular apple sequence.
+Fitness is a random variable, because the apple is placed at random. The estimator used at generation $`n`$ is
 
-Evaluation is distributed over all cores with `multiprocessing`. It uses the *spawn* context, which is
-safe alongside the GUI thread. The performance reported in §5 is measured on **seeds never used during
-training**.
+```math
+\hat F_n(\theta) = \frac{1}{K} \sum_{j=1}^{K} \big( 1000\, A(\theta, \omega_{n,j}) + T(\theta, \omega_{n,j}) \big), \qquad K = 3,
+```
+
+where $`\omega_{n,j}`$ are the random seeds of the episodes. Three measures control its variance:
+1. **Averaging** over $`K`$ games.
+2. **Common random numbers**: within a generation, every genome plays the *same* seeds $`\omega_{n,1}, \dots, \omega_{n,K}`$. Comparing two individuals then measures their policies rather than the luck of the draws, since $`\operatorname{Var}(\hat F_n(\theta_1) - \hat F_n(\theta_2))`$ is reduced by the positive correlation between the two estimates.
+3. **Re-evaluating elites**: the seeds change every generation and a copied elite is evaluated again. Otherwise the retained champion would be $`\max_i \hat F(\theta_i)`$, an estimator biased upwards, since $`\mathbb{E}[\max_i \hat F(\theta_i)] \ge \max_i F(\theta_i)`$ (the *winner's curse*), and the population could overfit one particular apple sequence.
+
+Evaluation is distributed over all cores with `multiprocessing`. It uses the *spawn* context, which is safe alongside the GUI thread. The performance reported in §5 is measured on **seeds never used during training**.
 
 ## 4. Code layout
 
@@ -217,15 +271,21 @@ runs/ablation/    raw ablation data
 
 ## 5. Experiments
 
-**Protocol.** 15×15 board, population 150, K = 3 games per evaluation, 300 generations, 3 independent
+**Protocol.** 15×15 board, population $`N_{\text{pop}} = 150`$, $`K = 3`$ games per evaluation, 300 generations, 3 independent
 seeds per variant. Each training run takes about 50 s on 24 cores. We measure the champion of the last
 generation on **200 test games** whose seeds were never used in training. Reproduce with
 `uv run python experiments/ablation.py --generations 300 --seeds 0 1 2`. The raw data is in
 `runs/ablation/results.json`.
 
 ### 5.1 Reference performance
-The demo champion (`runs/demo/champion.json`, seed 0, 300 generations) scores **60.4 ± 0.8 apples**
-(95 % CI, 500 test games). The median is 60 and the best game reaches 88 apples, a length of 91 cells,
+The demo champion (`runs/demo/champion.json`, seed 0, 300 generations) scores **60.4 ± 0.8 apples** over
+$`n = 500`$ test games, where the 95 % confidence interval is
+
+```math
+\bar A \pm 1.96\, \frac{s_A}{\sqrt{n}} = 60.4 \pm 0.8 .
+```
+
+The median is 60 and the best game reaches 88 apples, a length of 91 cells,
 or 40 % of the board. Causes of death: body 69 %, wall 26 %, starvation 4 %. A random snake eats about
 0.1 apple per game. About **8 generations** are enough to exceed 20 apples.
 
@@ -234,7 +294,7 @@ or 40 % of the board. Causes of death: body 69 %, wall 26 %, starvation 4 %. A r
 | Variant | test apples (mean of 3 seeds) | std. across seeds | Welch t vs baseline | champion hidden nodes |
 |---|---|---|---|---|
 | **NEAT (baseline)** | **60.8** | 5.9 | — | 9.3 |
-| δ unnormalized (N = 1) | 56.3 | 3.0 | 1.2 | 13.0 |
+| δ unnormalized ($`N = 1`$) | 56.3 | 3.0 | 1.2 | 13.0 |
 | no speciation | 54.2 | 1.3 | 1.9 | 6.0 |
 | fixed topology (weights only, 24→3) | 52.6 | 1.4 | 2.4 | 0 |
 | + food compass (26 inputs) | 50.6 | 1.0 | 3.0 | 7.0 |
@@ -242,12 +302,20 @@ or 40 % of the board. Causes of death: body 69 %, wall 26 %, starvation 4 %. A r
 ![Learning curves](docs/ablation_curves.svg)
 
 **Critical reading.**
-1. **The full configuration comes first, but the gap is not statistically established.** With 3 seeds
-   per variant, Welch's t (about 2.2 degrees of freedom) does not reach the 5 % threshold for any
-   variant: it would need t ≳ 4. The training curves overlap widely, and every variant reaches a
-   plateau of 55–62 apples within about 100 generations. The careful conclusion is that **on this
-   problem, topological complexification and speciation bring at most a modest gain**. At least 10 seeds
-   per variant would be needed to decide.
+
+**1. The full configuration comes first, but the gap is not statistically established.** With
+$`n_1 = n_2 = 3`$ seeds per variant, Welch's statistic
+
+```math
+t = \frac{\bar A_1 - \bar A_2}{\sqrt{s_1^2 / n_1 + s_2^2 / n_2}}
+```
+
+has about $`\nu \approx 2.2`$ degrees of freedom, and it does not reach the 5 % threshold for any
+variant: that would need $`t \gtrsim 4`$. The training curves overlap widely, and every variant reaches a
+plateau of 55–62 apples within about 100 generations. The careful conclusion is that **on this
+problem, topological complexification and speciation bring at most a modest gain**. At least 10 seeds
+per variant would be needed to decide.
+
 2. **A perceptron with no hidden layer (24→3) is already very strong.** With a well-designed egocentric
    perception, a nearly linear policy eats about 50 apples. This is the premise of NEAT: start minimal,
    complexify only when selected. NEAT champions indeed recruit only 5 to 13 hidden neurons.
@@ -267,12 +335,14 @@ or 40 % of the board. Causes of death: body 69 %, wall 26 %, starvation 4 %. A r
 ## 6. Limitations and future work
 
 - **Local perception**: the 8 rays give neither the global shape of the body nor the position of the
-  tail, so the snake cannot plan ahead to avoid enclosing itself. This explains most "body" deaths once
+  tail, so $`\phi`$ is not a sufficient statistic of $`s`$ and the snake cannot plan ahead to avoid
+  enclosing itself. This explains most "body" deaths once
   the snake is long. Possible additions: tail direction, a local k×k map, or a reachability feature such
   as the size of the free connected region ahead of each action.
 - **Recurrent connections** are excluded here. Allowing them would give memory, for example of the
   last known apple position.
-- **Normalization of δ**: with 72 initial genes, the topological terms E/N and D/N are diluted. The
+- **Normalization of $`\delta`$**: with 72 initial genes, the topological terms $`E/N`$ and $`D/N`$ are diluted:
+  adding one hidden node changes $`\delta`$ by only about $`2/72 \approx 0.03`$. The
   "δ unnormalized" ablation measures the effect of a structure-sensitive speciation.
 - **Cost**: about 0.1–0.5 s per generation on 24 cores. Cost grows with game length, hence with the
   skill of the snakes.
