@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Training outputs: only the demo champion and the ablation data are versioned.
+runs/*
+!runs/demo/
+runs/demo/*
+!runs/demo/champion.json
+!runs/demo/final_eval.json
+!runs/ablation/
+runs/ablation/*
+!runs/ablation/results.json
